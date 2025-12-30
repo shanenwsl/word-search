@@ -1,0 +1,178 @@
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: system-ui, sans-serif;
+  background: white;
+  color: #0a1f44;
+}
+
+/* ---------- HOME ---------- */
+.app {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  position: relative;
+}
+
+.login-container {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+}
+
+.login-button {
+  border: 2px solid #0a1f44;
+  background: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-weight: 700;
+}
+
+.center-content { text-align: center; padding: 16px; }
+.title { font-size: 64px; margin: 0; letter-spacing: 2px; }
+.subtitle { margin: 8px 0 28px; }
+
+.button-group { display: flex; flex-direction: column; gap: 12px; }
+
+.main-button {
+  background: #0a1f44;
+  color: white;
+  padding: 14px 18px;
+  border-radius: 10px;
+  border: none;
+  font-weight: 800;
+}
+
+/* ---------- GAME ---------- */
+.game-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px;
+  gap: 10px;
+}
+
+.back-button {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid #c9d6ef;
+  color: #0a1f44;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-weight: 800;
+}
+
+.grid-wrap {
+  position: relative;
+  width: min(92vw, 380px);
+  aspect-ratio: 1 / 1;
+  touch-action: none;
+  user-select: none;
+}
+
+/* IMPORTANT: grid is below */
+.grid {
+  position: relative;
+  z-index: 1;
+
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  grid-template-rows: repeat(10, 1fr);
+  gap: 4px;
+}
+
+.cell {
+  border: 1px solid #dbe3f4;
+  border-radius: 6px;
+  background: white; /* keeps tiles consistent */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  user-select: none;
+  .cell {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
+}
+
+}
+
+/* IMPORTANT: SVG overlay above EVERYTHING */
+.line-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;           /* <-- fixes “behind tiles” issue */
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.words-grid {
+  width: min(92vw, 380px);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.word-slot {
+  text-align: center;
+  font-weight: 800;
+  font-size: 14px;
+  padding: 2px 0;
+}
+
+.word-slot.empty { visibility: hidden; }
+.word-slot.found { text-decoration: line-through; color: #7a8bb0; }
+
+.timer-under {
+  font-weight: 900;
+  margin-top: 2px;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 31, 68, 0.35);
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  z-index: 9999; /* 🔥 higher than grid & svg */
+}
+
+.modal {
+  background: white;
+  padding: 24px 20px;
+  border-radius: 16px;
+  min-width: 260px;
+  max-width: 90vw;
+  text-align: center;
+
+  box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+}
+/* Disable text selection everywhere in the game */
+* {
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+html, body {
+  touch-action: manipulation;
+}
+html, body {
+  overscroll-behavior-y: contain;
+}
+body.no-refresh {
+  position: fixed;
+  width: 100%;
+  overflow: hidden;
+}
