@@ -20,8 +20,9 @@ const NAVY = "#0a1f44";
 const PACKS_PER_DAY = 50;
 
 const COMPLETED_PACKS_KEY = "nwsl_completed_packs_v2";
+const STARTED_PACKS_KEY = "nwsl_started_packs_v1";
 
-/* ================= IDB (iOS-safe persistence) ================= */
+/* ================= IDB (completed only) ================= */
 const IDB_DB = "nwsl";
 const IDB_STORE = "kv";
 const IDB_KEY = "completedPacks";
@@ -31,7 +32,9 @@ function idbOpen(): Promise<IDBDatabase> {
     const req = indexedDB.open(IDB_DB, 1);
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -63,7 +66,6 @@ async function idbSet<T>(key: string, value: T): Promise<void> {
 }
 
 /* ================= STORAGE ================= */
-const STARTED_PACKS_KEY = "nwsl_started_packs_v1";
 async function getStartedPacks(): Promise<Record<string, number>> {
   try {
     const raw = localStorage.getItem(STARTED_PACKS_KEY);
@@ -75,14 +77,12 @@ async function getStartedPacks(): Promise<Record<string, number>> {
 
 async function markPackStarted(seed: string) {
   const packs = await getStartedPacks();
-
   if (!packs[seed]) {
-    packs[seed] = Date.now(); // lock moment
+    packs[seed] = Date.now();
     localStorage.setItem(STARTED_PACKS_KEY, JSON.stringify(packs));
   }
 }
 
-// Primary: IndexedDB (iOS safe). Secondary: localStorage (best-effort).
 async function getCompletedPacks(): Promise<Record<string, number>> {
   try {
     const fromIdb = await idbGet<Record<string, number>>(IDB_KEY);
@@ -97,7 +97,6 @@ async function getCompletedPacks(): Promise<Record<string, number>> {
   }
 }
 
-// Best time only (lower ms = better)
 async function markPackCompleted(seed: string, timeMs: number): Promise<number> {
   const packs = await getCompletedPacks();
   const prev = packs[seed];
@@ -105,12 +104,10 @@ async function markPackCompleted(seed: string, timeMs: number): Promise<number> 
 
   const next = { ...packs, [seed]: best };
 
-  // Save to IDB (primary)
   try {
     await idbSet(IDB_KEY, next);
   } catch {}
 
-  // Also try localStorage (secondary)
   try {
     localStorage.setItem(COMPLETED_PACKS_KEY, JSON.stringify(next));
   } catch {}
@@ -118,7 +115,7 @@ async function markPackCompleted(seed: string, timeMs: number): Promise<number> 
   return best;
 }
 
-/* ================= DATE / SEEDS ================= */
+/* ================= DATE ================= */
 function todayKeyLocal() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
@@ -126,20 +123,22 @@ function todayKeyLocal() {
   ).padStart(2, "0")}`;
 }
 
-/** Optional: put your real feedback link here for Friday */
-const FEEDBACK_URL = "https://forms.gle/HqB58mpCepuhvK8UA";
-
+/* ================= AUDIO ================= */
 /* ================= AUDIO ================= */
 let audioUnlocked = false;
-const wordFoundSound = new Audio(wordFoundSoundFile);
-const puzzleCompleteSound = new Audio(puzzleCompleteSoundFile);
 
-// Silent “warm up” to satisfy iOS/Chrome gesture requirement
+// 🔊 Sound pools (IMPORTANT)
+const WORD_SOUND_POOL = Array.from({ length: 3 }, () => new Audio(wordFoundSoundFile));
+const COMPLETE_SOUND_POOL = Array.from({ length: 2 }, () => new Audio(puzzleCompleteSoundFile));
+
+let wordSoundIndex = 0;
+let completeSoundIndex = 0;
+
 function unlockAudioSilently() {
   if (audioUnlocked) return;
   audioUnlocked = true;
 
-  [wordFoundSound, puzzleCompleteSound].forEach((a) => {
+  [...WORD_SOUND_POOL, ...COMPLETE_SOUND_POOL].forEach((a) => {
     a.muted = true;
     a.currentTime = 0;
     a.play()
@@ -152,8 +151,18 @@ function unlockAudioSilently() {
   });
 }
 
-function playSound(a: HTMLAudioElement) {
+function playWordSound() {
   if (!audioUnlocked) return;
+  const a = WORD_SOUND_POOL[wordSoundIndex];
+  wordSoundIndex = (wordSoundIndex + 1) % WORD_SOUND_POOL.length;
+  a.currentTime = 0;
+  a.play().catch(() => {});
+}
+
+function playCompleteSound() {
+  if (!audioUnlocked) return;
+  const a = COMPLETE_SOUND_POOL[completeSoundIndex];
+  completeSoundIndex = (completeSoundIndex + 1) % COMPLETE_SOUND_POOL.length;
   a.currentTime = 0;
   a.play().catch(() => {});
 }
@@ -281,6 +290,9 @@ function generatePuzzleGuaranteed(words: string[], seed: string) {
   return Array.from({ length: GRID_SIZE }, () => Array(GRID_SIZE).fill("X"));
 }
 
+/** Optional: feedback link */
+const FEEDBACK_URL = "https://forms.gle/HqB58mpCepuhvK8UA";
+
 /* ================= APP ================= */
 export default function App() {
   const [page, setPage] = useState<Page>("home");
@@ -290,6 +302,9 @@ export default function App() {
 
   // completed packs { seed: bestTimeMs }
   const [completedPacks, setCompletedPacks] = useState<Record<string, number>>({});
+
+  // started packs { seed: startedAtMs }
+  const [startedPacks, setStartedPacks] = useState<Record<string, number>>({});
 
   // Pack progress
   const [puzzleIndex, setPuzzleIndex] = useState(0);
@@ -322,7 +337,26 @@ export default function App() {
 
   const dailySeeds = useMemo(() => dailyPackSeeds(PACKS_PER_DAY, dayKeyRef.current), []);
 
-  // Load completed packs on boot (FIX: await the async function)
+  const activePackSeed = dailySeeds[packSeedIndex % dailySeeds.length];
+
+  // Load started packs on boot
+  useEffect(() => {
+    (async () => {
+      const packs = await getStartedPacks();
+      setStartedPacks(packs);
+    })();
+  }, []);
+
+  // Refresh started packs when entering packs page
+  useEffect(() => {
+    if (page !== "packs") return;
+    (async () => {
+      const packs = await getStartedPacks();
+      setStartedPacks(packs);
+    })();
+  }, [page]);
+
+  // Load completed packs on boot
   useEffect(() => {
     (async () => {
       const packs = await getCompletedPacks();
@@ -330,7 +364,7 @@ export default function App() {
     })();
   }, []);
 
-  // Refresh completed packs whenever user enters packs page (keeps UI correct on iPhone/PWA)
+  // Refresh completed packs when entering packs page
   useEffect(() => {
     if (page !== "packs") return;
     (async () => {
@@ -338,8 +372,6 @@ export default function App() {
       setCompletedPacks(packs);
     })();
   }, [page]);
-
-  const activePackSeed = dailySeeds[packSeedIndex % dailySeeds.length];
 
   useEffect(() => {
     try {
@@ -364,8 +396,7 @@ export default function App() {
   /* ================= Disable pull-to-refresh / selection (game only) ================= */
   useEffect(() => {
     if (page !== "game") return;
-    // 🔒 LOCK PACK ON FIRST ENTRY
-  markPackStarted(activePackSeed);
+
     const prevent = (e: TouchEvent) => e.preventDefault();
     document.body.style.overflow = "hidden";
     document.body.style.touchAction = "none";
@@ -415,6 +446,14 @@ export default function App() {
       setCountdown((c) => {
         if (c === 1) {
           window.clearInterval(cd);
+
+          // ✅ commit attempt ONLY when countdown finishes
+          (async () => {
+            await markPackStarted(activePackSeed);
+            const packs = await getStartedPacks();
+            setStartedPacks(packs);
+          })();
+
           setGameReady(true);
           packStart.current = null; // timer effect sets it
           return 0;
@@ -460,10 +499,9 @@ export default function App() {
     } else {
       // finished the whole PACK
       setPackComplete(true);
-      playSound(puzzleCompleteSound);
+      playCompleteSound();
       navigator.vibrate?.(30);
 
-      // ✅ lock pack + save best time (FIX: async + state update with best time)
       (async () => {
         const best = await markPackCompleted(activePackSeed, elapsedMs);
         setCompletedPacks((p) => ({ ...p, [activePackSeed]: best }));
@@ -496,7 +534,6 @@ export default function App() {
     if (!gameReady) return;
     if (packComplete) return;
 
-    // Must be called from a real gesture
     unlockAudioSilently();
 
     const r = rect();
@@ -526,7 +563,6 @@ export default function App() {
 
       const MIN_PIXELS = 14;
       if (adx < MIN_PIXELS && ady < MIN_PIXELS) {
-        // still update live line for feedback
         setLiveLine({
           start: center(startCell.current),
           end: { x: e.clientX - r.left, y: e.clientY - r.top },
@@ -534,25 +570,19 @@ export default function App() {
         return;
       }
 
-      const DIAGONAL_SLOP = 0.58; // lower = easier diagonal
-      const AXIS_DOMINANCE = 2.6; // higher = stricter axis
+      const DIAGONAL_SLOP = 0.58;
+      const AXIS_DOMINANCE = 2.6;
 
       const min = Math.min(adx, ady);
       const max = Math.max(adx, ady);
 
-      // DIAGONAL
       if (min / max >= DIAGONAL_SLOP) {
         dirLock.current = { r: Math.sign(dy), c: Math.sign(dx) };
-      }
-      // VERTICAL
-      else if (ady >= adx * AXIS_DOMINANCE) {
+      } else if (ady >= adx * AXIS_DOMINANCE) {
         dirLock.current = { r: Math.sign(dy), c: 0 };
-      }
-      // HORIZONTAL
-      else if (adx >= ady * AXIS_DOMINANCE) {
+      } else if (adx >= ady * AXIS_DOMINANCE) {
         dirLock.current = { r: 0, c: Math.sign(dx) };
       }
-      // otherwise: no lock yet (user hasn’t committed)
     }
 
     setLiveLine({
@@ -583,7 +613,7 @@ export default function App() {
         const rev = text.split("").reverse().join("");
         if (text !== w && rev !== w) continue;
 
-        // Require finger to be near either end (prevents “ghost finds”)
+        // Require finger to be near either end
         const r = rect();
         const fingerPos: Vec = {
           x: liveLine?.end.x ?? center(cells[cells.length - 1]).x,
@@ -601,8 +631,7 @@ export default function App() {
 
         if (Math.min(dStart, dEnd) > END_TOLERANCE) continue;
 
-        // ✅ FOUND
-        playSound(wordFoundSound);
+        playWordSound();
         navigator.vibrate?.(12);
 
         setFound((p) => new Set(p).add(w));
@@ -619,7 +648,6 @@ export default function App() {
 
   /* ================= UI actions ================= */
   function playAgain() {
-    // This is “next pack”, not replay same pack
     setPackSeedIndex((i) => (i + 1) % dailySeeds.length);
     setPage("game");
   }
@@ -628,7 +656,6 @@ export default function App() {
   if (page === "home") {
     return (
       <div className="app" style={{ position: "relative" }}>
-        {/* Alpha banner */}
         <div
           style={{
             position: "absolute",
@@ -645,7 +672,6 @@ export default function App() {
           Private Alpha — Progress may reset
         </div>
 
-        {/* Optional feedback link */}
         {FEEDBACK_URL && (
           <a
             href={FEEDBACK_URL}
@@ -681,7 +707,6 @@ export default function App() {
     );
   }
 
-  /* ================= PACK SELECT ================= */
   if (page === "packs") {
     return (
       <div className="app">
@@ -691,9 +716,7 @@ export default function App() {
 
         <div className="center-content">
           <h2 style={{ marginBottom: 12 }}>Today’s Puzzle Packs</h2>
-          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 16 }}>
-            All players see the same packs today
-          </div>
+          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 16 }}>All players see the same packs today</div>
 
           <div
             style={{
@@ -705,25 +728,31 @@ export default function App() {
           >
             {dailySeeds.map((seed, i) => {
               const timeMs = completedPacks[seed];
+              const started = typeof startedPacks[seed] === "number";
               const completed = Number.isFinite(timeMs);
+              const locked = started && !completed;
 
               return (
                 <button
                   key={seed}
                   className="main-button"
-                  disabled={completed}
+                  disabled={completed || locked}
                   style={{
                     padding: "12px 0",
-                    opacity: completed ? 0.4 : 1,
-                    cursor: completed ? "not-allowed" : "pointer",
+                    opacity: completed || locked ? 0.4 : 1,
+                    cursor: completed || locked ? "not-allowed" : "pointer",
                   }}
                   onClick={() => {
-                    if (completed) return;
+                    if (completed || locked) return;
                     setPackSeedIndex(i);
                     setPage("game");
                   }}
                 >
-                  {completed ? `Pack ${i + 1} ✓ ${formatTime(timeMs)}` : `Pack ${i + 1}`}
+                  {completed
+                    ? `Pack ${i + 1} ✓ ${formatTime(timeMs)}`
+                    : locked
+                    ? `Pack ${i + 1} 🔒 In Progress`
+                    : `Pack ${i + 1}`}
                 </button>
               );
             })}
@@ -740,42 +769,49 @@ export default function App() {
         ← Packs
       </button>
 
-      {/* Countdown overlay that blocks everything */}
       {!gameReady && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "white",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 9999,
-            userSelect: "none",
-            WebkitUserSelect: "none",
-          }}
-        >
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 14, color: NAVY, opacity: 0.8, marginBottom: 10 }}>
-              Get ready…
-            </div>
-            <div style={{ fontSize: 96, fontWeight: 900, color: NAVY, lineHeight: 1 }}>
-              {countdown === 0 ? "GO!" : countdown}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Alpha banner on game page too */}
+  <div
+    style={{
+      position: "fixed",
+      inset: 0,
+      background: "white",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 9999,
+      userSelect: "none",
+      WebkitUserSelect: "none",
+    }}
+  >
+    <div style={{ textAlign: "center", maxWidth: 320 }}>
       <div
         style={{
-          marginTop: 8,
-          textAlign: "center",
-          fontSize: 12,
+          fontSize: 14,
           color: NAVY,
-          opacity: 0.7,
+          opacity: 0.85,
+          marginBottom: 14,
+          lineHeight: 1.4,
         }}
       >
+        Once this puzzle pack starts, leaving will lock it for today.
+      </div>
+
+      <div
+        style={{
+          fontSize: 96,
+          fontWeight: 900,
+          color: NAVY,
+          lineHeight: 1,
+        }}
+      >
+        {countdown === 0 ? "GO!" : countdown}
+      </div>
+    </div>
+  </div>
+)}
+
+
+      <div style={{ marginTop: 8, textAlign: "center", fontSize: 12, color: NAVY, opacity: 0.7 }}>
         Private Alpha — Progress may reset
       </div>
 
@@ -847,7 +883,6 @@ export default function App() {
 
       <div className="timer-under">{formatTime(elapsedMs)}</div>
 
-      {/* Completion modal */}
       {packComplete && (
         <div className="modal-overlay">
           <div className="modal">
