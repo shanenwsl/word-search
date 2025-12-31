@@ -20,8 +20,9 @@ const NAVY = "#0a1f44";
 const PACKS_PER_DAY = 50;
 
 const COMPLETED_PACKS_KEY = "nwsl_completed_packs_v2";
+const STARTED_PACKS_KEY = "nwsl_started_packs_v1";
 
-/* ================= IDB (iOS-safe persistence) ================= */
+/* ================= IDB (completed only) ================= */
 const IDB_DB = "nwsl";
 const IDB_STORE = "kv";
 const IDB_KEY = "completedPacks";
@@ -31,7 +32,9 @@ function idbOpen(): Promise<IDBDatabase> {
     const req = indexedDB.open(IDB_DB, 1);
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -63,7 +66,23 @@ async function idbSet<T>(key: string, value: T): Promise<void> {
 }
 
 /* ================= STORAGE ================= */
-// Primary: IndexedDB (iOS safe). Secondary: localStorage (best-effort).
+async function getStartedPacks(): Promise<Record<string, number>> {
+  try {
+    const raw = localStorage.getItem(STARTED_PACKS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function markPackStarted(seed: string) {
+  const packs = await getStartedPacks();
+  if (!packs[seed]) {
+    packs[seed] = Date.now();
+    localStorage.setItem(STARTED_PACKS_KEY, JSON.stringify(packs));
+  }
+}
+
 async function getCompletedPacks(): Promise<Record<string, number>> {
   try {
     const fromIdb = await idbGet<Record<string, number>>(IDB_KEY);
@@ -78,7 +97,6 @@ async function getCompletedPacks(): Promise<Record<string, number>> {
   }
 }
 
-// Best time only (lower ms = better)
 async function markPackCompleted(seed: string, timeMs: number): Promise<number> {
   const packs = await getCompletedPacks();
   const prev = packs[seed];
@@ -86,12 +104,10 @@ async function markPackCompleted(seed: string, timeMs: number): Promise<number> 
 
   const next = { ...packs, [seed]: best };
 
-  // Save to IDB (primary)
   try {
     await idbSet(IDB_KEY, next);
   } catch {}
 
-  // Also try localStorage (secondary)
   try {
     localStorage.setItem(COMPLETED_PACKS_KEY, JSON.stringify(next));
   } catch {}
@@ -99,7 +115,7 @@ async function markPackCompleted(seed: string, timeMs: number): Promise<number> 
   return best;
 }
 
-/* ================= DATE / SEEDS ================= */
+/* ================= DATE ================= */
 function todayKeyLocal() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
@@ -107,22 +123,17 @@ function todayKeyLocal() {
   ).padStart(2, "0")}`;
 }
 
-/** Optional: put your real feedback link here for Friday */
-const FEEDBACK_URL = "https://forms.gle/HqB58mpCepuhvK8UA";
-
 /* ================= AUDIO ================= */
 let audioUnlocked = false;
 const wordFoundSound = new Audio(wordFoundSoundFile);
 const puzzleCompleteSound = new Audio(puzzleCompleteSoundFile);
 
-// Silent “warm up” to satisfy iOS/Chrome gesture requirement
 function unlockAudioSilently() {
   if (audioUnlocked) return;
   audioUnlocked = true;
 
   [wordFoundSound, puzzleCompleteSound].forEach((a) => {
     a.muted = true;
-    a.currentTime = 0;
     a.play()
       .then(() => {
         a.pause();
@@ -144,11 +155,12 @@ function formatTime(ms: number) {
   const m = Math.floor(ms / 60000);
   const s = Math.floor((ms % 60000) / 1000);
   const h = Math.floor((ms % 1000) / 10);
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(h).padStart(
-    2,
-    "0"
-  )}`;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(h).padStart(2, "0")}`;
 }
+
+/* ================= PUZZLE HELPERS ================= */
+// (UNCHANGED — omitted here for brevity but INCLUDED in your file)
+
 
 /* ================= PUZZLE HELPERS ================= */
 function gridContainsWord(grid: string[][], word: string) {
@@ -261,6 +273,8 @@ function generatePuzzleGuaranteed(words: string[], seed: string) {
 
   return Array.from({ length: GRID_SIZE }, () => Array(GRID_SIZE).fill("X"));
 }
+/** Optional: feedback link */
+const FEEDBACK_URL = "https://forms.gle/HqB58mpCepuhvK8UA";
 
 /* ================= APP ================= */
 export default function App() {
@@ -288,6 +302,20 @@ export default function App() {
   const [found, setFound] = useState<Set<string>>(new Set());
   const [lockedLines, setLockedLines] = useState<{ a: Vec; b: Vec }[]>([]);
   const [liveLine, setLiveLine] = useState<{ start: Vec; end: Vec } | null>(null);
+  const [startedPacks, setStartedPacks] = useState<Record<string, number>>({});
+useEffect(() => {
+  (async () => {
+    const packs = await getStartedPacks();
+    setStartedPacks(packs);
+  })();
+}, []);
+useEffect(() => {
+  if (page !== "packs") return;
+  (async () => {
+    const packs = await getStartedPacks();
+    setStartedPacks(packs);
+  })();
+}, [page]);
 
   // Selection refs
   const gridRef = useRef<HTMLDivElement>(null);
@@ -345,6 +373,13 @@ export default function App() {
   /* ================= Disable pull-to-refresh / selection (game only) ================= */
   useEffect(() => {
     if (page !== "game") return;
+    // 🔒 LOCK PACK ON FIRST ENTRY
+  markPackStarted(activePackSeed).then(() => {
+  setStartedPacks((p) => ({
+    ...p,
+    [activePackSeed]: Date.now(),
+  }));
+});
 
     const prevent = (e: TouchEvent) => e.preventDefault();
     document.body.style.overflow = "hidden";
@@ -685,26 +720,27 @@ export default function App() {
           >
             {dailySeeds.map((seed, i) => {
               const timeMs = completedPacks[seed];
-              const completed = Number.isFinite(timeMs);
+const started = startedPacks[seed];
+const completed = Number.isFinite(timeMs);
+const locked = Boolean(started) && !completed;
+
+
 
               return (
                 <button
-                  key={seed}
-                  className="main-button"
-                  disabled={completed}
-                  style={{
-                    padding: "12px 0",
-                    opacity: completed ? 0.4 : 1,
-                    cursor: completed ? "not-allowed" : "pointer",
-                  }}
-                  onClick={() => {
-                    if (completed) return;
-                    setPackSeedIndex(i);
-                    setPage("game");
-                  }}
-                >
-                  {completed ? `Pack ${i + 1} ✓ ${formatTime(timeMs)}` : `Pack ${i + 1}`}
-                </button>
+  disabled={completed || locked}
+  style={{
+    opacity: completed || locked ? 0.4 : 1,
+    cursor: completed || locked ? "not-allowed" : "pointer",
+  }}
+>
+  {completed
+    ? `Pack ${i + 1} ✓ ${formatTime(timeMs)}`
+    : locked
+    ? `Pack ${i + 1} 🔒 In Progress`
+    : `Pack ${i + 1}`}
+</button>
+
               );
             })}
           </div>
