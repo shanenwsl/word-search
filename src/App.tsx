@@ -328,6 +328,7 @@ export default function App() {
   const startCell = useRef<Cell | null>(null);
   const dirLock = useRef<Cell | null>(null);
   const startPoint = useRef<{ x: number; y: number } | null>(null);
+  const lastClient = useRef<{ x: number; y: number } | null>(null);
 
   const dayKeyRef = useRef(todayKeyLocal());
 
@@ -521,38 +522,52 @@ export default function App() {
       y: (c.r + 0.5) * (r.height / GRID_SIZE),
     };
   }
+  
+  function cellFromClient(x: number, y: number): Cell | null {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    if (!el) return null;
 
-  function dist(a: Vec, b: Vec) {
-    const dx = a.x - b.x;
-    const dy = a.y - b.y;
-    return Math.sqrt(dx * dx + dy * dy);
+    const cellEl = el.closest(".cell") as HTMLElement | null;
+    if (!cellEl) return null;
+
+    const r = Number(cellEl.dataset.r);
+    const c = Number(cellEl.dataset.c);
+
+    if (!Number.isFinite(r) || !Number.isFinite(c)) return null;
+    return { r, c };
   }
 
   /* ================= Pointer handlers ================= */
-  function onDown(e: React.PointerEvent) {
+    function onDown(e: React.PointerEvent) {
     if (page !== "game") return;
     if (!gameReady) return;
     if (packComplete) return;
 
     unlockAudioSilently();
 
-    const r = rect();
-    const rr = Math.floor(((e.clientY - r.top) / r.height) * GRID_SIZE);
-    const cc = Math.floor(((e.clientX - r.left) / r.width) * GRID_SIZE);
-    if (rr < 0 || rr >= GRID_SIZE || cc < 0 || cc >= GRID_SIZE) return;
+    const c = cellFromClient(e.clientX, e.clientY);
+    if (!c) return;
 
-    startCell.current = { r: rr, c: cc };
+    startCell.current = c;
     startPoint.current = { x: e.clientX, y: e.clientY };
+    lastClient.current = { x: e.clientX, y: e.clientY };
     dirLock.current = null;
+
+    const r = rect();
+    setLiveLine({
+      start: center(c),
+      end: { x: e.clientX - r.left, y: e.clientY - r.top },
+    });
   }
 
   function onMove(e: React.PointerEvent) {
     if (page !== "game") return;
     if (!gameReady) return;
     if (!startCell.current || packComplete) return;
+        lastClient.current = { x: e.clientX, y: e.clientY };
 
     const r = rect();
-
+    
     // Direction lock in PIXELS (more reliable than grid-cell deltas)
     if (!dirLock.current && startPoint.current) {
       const dx = e.clientX - startPoint.current.x;
@@ -561,7 +576,7 @@ export default function App() {
       const adx = Math.abs(dx);
       const ady = Math.abs(dy);
 
-      const MIN_PIXELS = 14;
+      const MIN_PIXELS = 10;
       if (adx < MIN_PIXELS && ady < MIN_PIXELS) {
         setLiveLine({
           start: center(startCell.current),
@@ -570,8 +585,8 @@ export default function App() {
         return;
       }
 
-      const DIAGONAL_SLOP = 0.58;
-      const AXIS_DOMINANCE = 2.6;
+      const DIAGONAL_SLOP = 0.38;
+      const AXIS_DOMINANCE = 2.4;
 
       const min = Math.min(adx, ady);
       const max = Math.max(adx, ady);
@@ -590,58 +605,96 @@ export default function App() {
       end: { x: e.clientX - r.left, y: e.clientY - r.top },
     });
   }
-
-  function onUp() {
+  
+    function onUp() {
     try {
       if (page !== "game") return;
       if (!gameReady) return;
-      if (!startCell.current || !dirLock.current || packComplete) return;
+      if (packComplete) return;
+      if (!startCell.current) return;
+      if (!lastClient.current) return;
+
+      const sr = startCell.current.r;
+      const sc = startCell.current.c;
+
+      const lift = lastClient.current;
+      const liftCell = cellFromClient(lift.x, lift.y);
+
+      // Determine direction from drag (8 directions)
+      let stepR = 0;
+      let stepC = 0;
+
+      if (startPoint.current) {
+        const dx = lift.x - startPoint.current.x;
+        const dy = lift.y - startPoint.current.y;
+
+        const adx = Math.abs(dx);
+        const ady = Math.abs(dy);
+
+        // ignore tiny drags/taps
+        if (adx < 8 && ady < 8) return;
+
+        if (ady > adx * 2) {
+          stepR = Math.sign(dy);
+          stepC = 0;
+        } else if (adx > ady * 2) {
+          stepR = 0;
+          stepC = Math.sign(dx);
+        } else {
+          stepR = Math.sign(dy);
+          stepC = Math.sign(dx);
+        }
+      } else if (liftCell) {
+        stepR = Math.sign(liftCell.r - sr);
+        stepC = Math.sign(liftCell.c - sc);
+      }
+
+      if (stepR === 0 && stepC === 0) return;
+
+      // 🔥 Forgiveness knob (increase to be looser)
+      const END_TOL = 1; // 1 = normal, 2 = very forgiving, 3 = super forgiving
+
+      function liftCloseTo(end: Cell, tol: number) {
+        if (!liftCell) return true;
+        const d = Math.max(Math.abs(liftCell.r - end.r), Math.abs(liftCell.c - end.c));
+        return d <= tol;
+      }
 
       for (const w of words) {
         if (found.has(w)) continue;
 
-        const cells = Array.from({ length: w.length }, (_, i) => ({
-          r: startCell.current!.r + dirLock.current!.r * i,
-          c: startCell.current!.c + dirLock.current!.c * i,
+        const end: Cell = { r: sr + stepR * (w.length - 1), c: sc + stepC * (w.length - 1) };
+
+        // end must be on grid
+        if (end.r < 0 || end.r >= GRID_SIZE || end.c < 0 || end.c >= GRID_SIZE) continue;
+
+        // allow lift to be near endpoint (forgiving)
+        if (!liftCloseTo(end, END_TOL)) continue;
+
+        const cells: Cell[] = Array.from({ length: w.length }, (_, i) => ({
+          r: sr + stepR * i,
+          c: sc + stepC * i,
         }));
 
-        if (cells.some((c) => c.r < 0 || c.r >= GRID_SIZE || c.c < 0 || c.c >= GRID_SIZE)) {
-          continue;
-        }
+        const forward = cells.map((c) => grid[c.r][c.c]).join("");
+        const backward = cells.slice().reverse().map((c) => grid[c.r][c.c]).join("");
 
-        const text = cells.map((c) => grid[c.r][c.c]).join("");
-        const rev = text.split("").reverse().join("");
-        if (text !== w && rev !== w) continue;
+        if (forward !== w && backward !== w) continue;
 
-        // Require finger to be near either end
-        const r = rect();
-        const fingerPos: Vec = {
-          x: liveLine?.end.x ?? center(cells[cells.length - 1]).x,
-          y: liveLine?.end.y ?? center(cells[cells.length - 1]).y,
-        };
-
-        const startCenter = center(cells[0]);
-        const endCenter = center(cells[cells.length - 1]);
-
-        const CELL_RADIUS = r.width / GRID_SIZE / 2;
-        const END_TOLERANCE = CELL_RADIUS * 0.99;
-
-        const dStart = dist(fingerPos, startCenter);
-        const dEnd = dist(fingerPos, endCenter);
-
-        if (Math.min(dStart, dEnd) > END_TOLERANCE) continue;
-
+        // ✅ MATCH — line uses true endpoints (fixes “found but no line”)
         playWordSound();
         navigator.vibrate?.(12);
 
         setFound((p) => new Set(p).add(w));
         setLockedLines((p) => [...p, { a: center(cells[0]), b: center(cells[cells.length - 1]) }]);
-        break;
+
+        return;
       }
     } finally {
       setLiveLine(null);
       startCell.current = null;
       startPoint.current = null;
+      lastClient.current = null;
       dirLock.current = null;
     }
   }
@@ -862,15 +915,25 @@ export default function App() {
         </svg>
 
         <div className="grid">
-          {grid.flat().map((c, i) => (
-            <div key={i} className="cell">
-              {c}
-            </div>
-          ))}
+  {grid.map((row, r) => (
+    <React.Fragment key={r}>
+      {row.map((ch, c) => (
+        <div
+          key={`${r}-${c}`}
+          className="cell"
+          data-r={r}
+          data-c={c}
+        >
+          {ch}
         </div>
-      </div>
+      ))}
+    </React.Fragment>
+  ))}
+</div> {/* ← closes .grid */}
+</div> {/* ← 🔥 THIS closes .grid-wrap */}
 
-      <div className="words-grid">
+<div className="words-grid">
+
         {Array.from({ length: 25 }).map((_, i) => {
           const w = words[i] ?? "";
           return (
